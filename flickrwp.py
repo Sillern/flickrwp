@@ -24,10 +24,14 @@ Redistribution and use in source and binary forms, with or without modification,
 $LastChangedDate$
 """
 
-
-import os, optparse, sys, random, time, glob, logging, traceback
+import os, optparse, sys, random, time
 import urllib2, urllib
 import xml.parsers.expat
+import cPickle as pickle
+from hashlib import sha1
+
+from datetime import date, timedelta
+
 random.seed()
 
 APIKEY = "e1bece9de5776d1259ed309428ff04c1"
@@ -47,7 +51,7 @@ class ResponseParser:
     def parse(self, xmlstr):
         self.parser.Parse(xmlstr)
         return self.data
-        
+
     def start_element(self, name, attrs):
         self.hie.append(self.cur)
         d={}
@@ -59,23 +63,23 @@ class ResponseParser:
         self.cur[name].append(d)
         self.cur = d["__child__"]
         self.body = d["__body__"]
-        
-            
+
+
     def end_element(self, name):
         self.cur = self.hie.pop()
-        
-        
+
     def char_data(self, data):
         self.body = self.body + data
 
 def callMethod(method, *a, **keys):
-    
+
     url = [URLBASE, "method=", method, "&api_key=", APIKEY]
     for k,v in keys.iteritems():
         url.append("&")
         url.append(k)
         url.append("=")
         url.append(urllib.quote(v))
+
     res = urllib.urlopen("".join(url))
     parser = ResponseParser()
     p = parser.parse(res.read())
@@ -83,150 +87,108 @@ def callMethod(method, *a, **keys):
     del res
     return p
 
+def SaveImage(cache_path, remote_source, metadata):
+    try:
+        if remote_source == None:
+            return
 
+        bp = urllib.urlopen(remote_source)
+        data = bp.read()
+        bp.close()
+        del bp
 
-def getFavorite(username, sizebound):
-    res = callMethod("flickr.people.findByUsername", username=username)
-    res = res["rsp"][0]
-    if res["__attrs__"]["stat"] == "fail":
-        print "findByUser failed"
-        return
+        sha1hash = sha1(data).hexdigest()
+        
+        print sha1hash, metadata
 
-    user_id = res["__child__"]["user"][0]["__attrs__"]["nsid"]
-    res = callMethod("flickr.favorites.getPublicList", user_id=user_id)
+        filepath = cache_path + os.path.sep + sha1hash
+        image_filepath = filepath + ".jpg"
+        metadata_filepath = filepath + ".meta"
+
+        fp = file(image_filepath, "wb")
+        fp.write(data)
+        fp.close()
+
+        fp = file(metadata_filepath, "wb")
+        pickle.dump(metadata, fp)
+        fp.close()
+
+    except Exception, e:
+        print e
+
+def getInterestingImages(cache_path, date):
+    res = callMethod("flickr.interestingness.getList", date=str(date), extras="tags")
     res = res["rsp"][0]
     if res["__attrs__"]["stat"] == "fail":
         print "getPublicList failed"
         return
-    return chooseOne(res, sizebound)
 
-def chooseOne(res, sizebound):
     total = res["__child__"]["photos"][0]["__attrs__"]["perpage"]
 
-    photoNum = random.randint(0,int(total) - 1)
+    for photoNum in range(0, int(total)):
+        try:
 
-    photo = res["__child__"]["photos"][0]["__child__"]["photo"][photoNum]["__attrs__"]
-    farmid = photo["farm"]
-    serverid = photo["server"]
-    id = photo["id"]
-    secret = photo["secret"]
+            tags = res["__child__"]["photos"][0]["__child__"]["photo"][photoNum]["__attrs__"]["tags"]
 
-    return getPhotoDetail(id, secret, sizebound)
+            if "nsfw" in tags.split(" "):
+                print "NSFW", tags
+                continue
 
-def getByTag(tags, sizebound):
-    res = callMethod("flickr.photos.search", tags=tags, tag_mode="all")
-    res = res["rsp"][0]
-    if res["__attrs__"]["stat"] == "fail":
-        print "search failed"
-        return
+            photo = res["__child__"]["photos"][0]["__child__"]["photo"][photoNum]["__attrs__"]
+            farmid = photo["farm"]
+            serverid = photo["server"]
+            secret = photo["secret"]
 
-    return chooseOne(res, sizebound)
+            getsizes = callMethod("flickr.photos.getSizes", photo_id=photo["id"])["rsp"][0]
+            if getsizes["__attrs__"]["stat"] == "fail":
+                print "getSizes failed"
+                return
 
-def getPhotoDetail(id, secret, sizebound):
-    res = callMethod("flickr.photos.getSizes", photo_id=id, secret=secret)
-    res = res["rsp"][0]
-    if res["__attrs__"]["stat"] == "fail":
-        print "getSizes failed"
-        return
-    source = None
-    for x in res["__child__"]["sizes"][0]["__child__"]["size"]:
-        if int(x["__attrs__"]["width"]) > sizebound:
-               break
-        source = x["__attrs__"]["source"]
-        if x["__attrs__"]["label"] == "Original":
-            break
-    return source
-    
+            imageinfo = getsizes["__child__"]["sizes"][-1]["__child__"]["size"][-1]["__attrs__"]
+            maxsize = imageinfo["height"], imageinfo["width"]
+            source = imageinfo["source"]
+
+            SaveImage(cache_path, source, imageinfo)
+
+        except Exception, e:
+            print e
+            print tags
+            print photo
+
+
+    return total
+
 
 if __name__ == "__main__":
-    bufDir = os.getenv("HOME") + os.path.sep + ".flickrwp"
-    if not os.path.exists(bufDir):
-        os.mkdir(bufDir)
-
-    logging.basicConfig(level=logging.DEBUG,
-                    format='%(asctime)s %(levelname)-8s LineNo:%(lineno)d %(message)s',
-                    datefmt='%a, %d %b %Y %H:%M:%S',
-                    filename=bufDir + os.path.sep + 'flickrwp.log',
-                    filemode='a')
-
     try:
         parser = optparse.OptionParser("""
         ./flickrwp.py [options]
-        
-        **************************************
-        ****   Flicker Wallpaper for KDE  ****
-        **************************************
-
-        This Program fetchs a flickr user's favorite photo randomely and places it on desktop.
-        This  only works on KDE/Linux.
 
         Example Usage:
-        
-         To get specified user's favorite photos: 
-            ./flickrwp.py -u hiroshiykw -s 1280 -c 333399
 
-         To get photos of tags:
-            ./flickrwp.py -g iceland,mountain -s 1280 -c 333399
+            ./flickrwp.py -d 2008-10-02
 
-         One of -u(--user) and -g(--tag) should be specified.
-         The two are not used both together.
-         
         """)
 
-        parser.add_option("-u", "--user", dest="user", help="user id (default: hiroshiykw)", default=None)
-        parser.add_option("-s", "--size-bound", dest="size", help="upper bound of image width (default: 1200)", default=1200)
-        parser.add_option("-c", "--color", dest="color", help="background color (default 333300)", default="333399")
+        parser.add_option("-d", "--date", dest="date", help="date", default=None)
+        parser.add_option("-p", "--cachepath", dest="cachepath", help="cachepath", default=None)
         parser.add_option("-t", "--time", dest="time", help="time to wait in [min.] (default: 10 min.)", type="int", default=10)
-        parser.add_option("-g", "--tag", dest="tag", help="comma-separated tags to search.", default=None)
-        parser.add_option("-G", "--Gnome", dest="gnome", help="Using Gnome as desktop environment.If this option is NOT used, assume that you are using KDE.", action="store_true", default=False)
-        
+
 
         (options, args) = parser.parse_args()
-        if (options.user == None and options.tag == None) or (options.user != None and options.tag != None):
-            print "You should specify either user (-u) or tags (-t)."
-            sys.exit(1)            
-        
-        while True:                
-            if options.user != None:
-                fileInfo = getFavorite(options.user, options.size)
-            elif options.tag != None:
-                fileInfo = getByTag(options.tag, options.size)
-            else:
-                print "ARIENAI!!"
-                sys.exit(1)
-                
-            if fileInfo != None:
-                bp = urllib.urlopen(fileInfo)
 
-            fname = bufDir + os.path.sep + str(int(time.time())) + "." + fileInfo[-3:]
-            delfnames = list(glob.glob(bufDir + os.path.sep + "*"))
-            
-            fp = file(fname, "wb")
-            fp.write(bp.read())
-            fp.close()
-            bp.close()
-            del bp
-            for d in delfnames:
-                if d[-3:] == "log": continue
-                os.remove(d)
-            if not options.gnome:
-                if os.system("/usr/bin/dcop kdesktop KBackgroundIface setColor '#%s' false" % options.color) != 0:
-                    logging.error("dcop error 1")
-                    sys.exit(1)
-                if  os.system("/usr/bin/dcop kdesktop KBackgroundIface setColor '#%s' false" % options.color) != 0:
-                    logging.error("dcop error 2")
-                    sys.exit(1)
-                if os.system("/usr/bin/dcop kdesktop KBackgroundIface setWallpaper %s 7" % fname) != 0:
-                    logging.error("dcop error 3")
-                    sys.exit(1)
-                logging.info("changed to " + fname)
-            else:
-                import gconf
-                client = gconf.client_get_default()
-                client.set_string ("/desktop/gnome/background/picture_filename", fname)
-                client.set_string("/desktop/gnome/background/picture_options", "centered")
-            time.sleep(options.time * 60)
+        if options.date == None:
+            options.date = date.today() - timedelta(days=7)
+
+        if options.cachepath == None:
+            options.cachepath = os.getenv("HOME") + os.path.sep + "flickrwp" + os.path.sep + "images"
+
+        if not os.path.exists(options.cachepath):
+            os.mkdir(options.cachepath)
+
+        print "Fetching interesting images"
+        getInterestingImages(options.cachepath, options.date)
+
     except Exception, e:
-        logging.error(e)
-        logging.error(traceback.format_exc())
+        print e
         sys.exit(1)

@@ -1,2 +1,10 @@
 Original code from http://tanashi.s240.xrea.com/flickrwp/ 
 Author: Ayukawa Hiroshi < ayukawa.hiroshi [atmark] gmail.com >
+
+Modified by: Sebastian Jegeras < sebastian.jegeras [atmark] gmail.com >
+
+Modifications:
+Simplified to only get images from the "interesting"-tag.
+Added default parameters.
+Saved the images as hashes of the content alongside a file containing the metadata.
+Added example slideshow-command via feh.
